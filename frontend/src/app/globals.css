@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+:root {
+  /* Warm ivory / cream surfaces */
+  --color-ivory: #faf6ef;
+  --color-cream: #f3ece0;
+  --color-beige: #e6dac3;
+  --color-beige-dark: #d8c9ab;
+
+  /* Sage + olive green (chrome, buttons, nav/footer) */
+  --color-sage-100: #e9ede1;
+  --color-sage-300: #b9c5a4;
+  --color-sage-400: #9fae86;
+  --color-sage-500: #869a6c;
+  --color-olive-500: #6b7353;
+  --color-olive-600: #5a6145;
+  --color-olive-700: #4b5138;
+  --color-olive-800: #3b402c;
+  --color-olive-900: #2e3122;
+
+  /* Terracotta accent -- used sparingly */
+  --color-terracotta-400: #cc8257;
+  --color-terracotta-500: #bd6a3c;
+  --color-terracotta-600: #a2572f;
+
+  /* Warm near-black ink, never pure black */
+  --color-ink: #2b2620;
+  --color-ink-muted: #6e6656;
+  --color-ink-soft: #978d79;
+}
+
+@theme inline {
+  --color-ivory: var(--color-ivory);
+  --color-cream: var(--color-cream);
+  --color-beige: var(--color-beige);
+  --color-beige-dark: var(--color-beige-dark);
+
+  --color-sage-100: var(--color-sage-100);
+  --color-sage-300: var(--color-sage-300);
+  --color-sage-400: var(--color-sage-400);
+  --color-sage-500: var(--color-sage-500);
+
+  --color-olive-500: var(--color-olive-500);
+  --color-olive-600: var(--color-olive-600);
+  --color-olive-700: var(--color-olive-700);
+  --color-olive-800: var(--color-olive-800);
+  --color-olive-900: var(--color-olive-900);
+
+  --color-terracotta-400: var(--color-terracotta-400);
+  --color-terracotta-500: var(--color-terracotta-500);
+  --color-terracotta-600: var(--color-terracotta-600);
+
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-soft: var(--color-ink-soft);
+
+  --font-serif: var(--font-fraunces);
+  --font-sans: var(--font-inter);
+}
+
+body {
+  background: var(--color-ivory);
+  color: var(--color-ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+h1,
+h2,
+h3,
+.font-serif {
+  font-family: var(--font-serif), ui-serif, Georgia, serif;
+}
