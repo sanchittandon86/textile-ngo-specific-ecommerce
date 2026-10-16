@@ -4,7 +4,7 @@
 // seeded this way.
 //
 // Usage:
-//   node scripts/seed-admin.js "Admin Name" admin@example.com "a-strong-password"
+//   node scripts/seed-admin.js "Sanchit Tandon" sanchit@example.com "Demo@123"
 require("dotenv").config();
 const bcrypt = require("bcryptjs");
 const pool = require("../src/config/db");
