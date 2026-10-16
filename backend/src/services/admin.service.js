@@ -1,9 +1,11 @@
-// Read-only admin data access. No mutations here by design -- this is
-// the first (read-only) version of the admin dashboard. Unlike the
-// public product/category APIs, these intentionally include
+// Admin data access, plus a small set of admin-driven mutations
+// (fulfillment status advancement, category create/activate). Unlike the
+// public product/category APIs, reads here intentionally include
 // unpublished products and inactive categories, since admins need to
 // see everything.
 const pool = require("../config/db");
+const { normalizeCategoryValue } = require("./product-import.service");
+const { uploadCategoryImage, deleteCategoryImage } = require("./cloudinary.service");
 
 async function listAllProducts({ page, limit }) {
   const offset = (page - 1) * limit;
@@ -33,6 +35,81 @@ async function listAllCategories() {
   );
 
   return result.rows;
+}
+
+// Create-only (no rename/edit) -- matches the bulk-import rule that
+// categories are never silently renamed. imageUrl, if given, is a
+// source URL the admin supplies; Cloudinary fetches it server-side and
+// we store the returned secure_url, never the raw input, as image_url.
+async function createCategory({ name, imageUrl }) {
+  const trimmedName = String(name || "").trim();
+
+  if (!trimmedName) {
+    return { ok: false, httpStatus: 400, message: "Category name is required" };
+  }
+
+  if (trimmedName.length > 150) {
+    return { ok: false, httpStatus: 400, message: "Category name is too long" };
+  }
+
+  const slug = normalizeCategoryValue(trimmedName);
+
+  if (!slug) {
+    return { ok: false, httpStatus: 400, message: "Category name must contain at least one letter or number" };
+  }
+
+  const existing = await pool.query(`SELECT id FROM categories WHERE slug = $1`, [slug]);
+  if (existing.rows.length > 0) {
+    return { ok: false, httpStatus: 409, message: `A category matching "${trimmedName}" already exists` };
+  }
+
+  let resolvedImageUrl = null;
+  let uploadedPublicId = null;
+
+  const trimmedImageUrl = String(imageUrl || "").trim();
+  if (trimmedImageUrl) {
+    try {
+      const uploaded = await uploadCategoryImage(trimmedImageUrl, { slug });
+      resolvedImageUrl = uploaded.secureUrl;
+      uploadedPublicId = uploaded.publicId;
+    } catch (error) {
+      console.error("Category image upload failed:", error.message);
+      return { ok: false, httpStatus: 502, message: "Unable to upload the category image" };
+    }
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO categories (name, slug, image_url, is_active)
+       VALUES ($1, $2, $3, TRUE)
+       RETURNING id, name, slug, image_url, is_active, created_at`,
+      [trimmedName, slug, resolvedImageUrl]
+    );
+
+    return { ok: true, category: result.rows[0] };
+  } catch (error) {
+    // Image already landed in Cloudinary -- don't leave it orphaned if
+    // the DB insert fails for any reason (e.g. a race on the slug
+    // uniqueness check above).
+    if (uploadedPublicId) {
+      await deleteCategoryImage(uploadedPublicId);
+    }
+    throw error;
+  }
+}
+
+async function setCategoryActive(id, isActive) {
+  const result = await pool.query(
+    `UPDATE categories SET is_active = $1 WHERE id = $2
+     RETURNING id, name, slug, image_url, is_active, created_at`,
+    [isActive, id]
+  );
+
+  if (result.rows.length === 0) {
+    return { ok: false, httpStatus: 404, message: "Category not found" };
+  }
+
+  return { ok: true, category: result.rows[0] };
 }
 
 const ORDER_STATUS_VALUES = [
@@ -92,6 +169,7 @@ async function getOrderDetail(orderNumber) {
             shipping_address_line1, shipping_address_line2, shipping_city,
             shipping_state, shipping_postal_code, shipping_country,
             subtotal, shipping_fee, discount_amount, total_amount, currency,
+            tracking_carrier, tracking_number,
             created_at, updated_at
      FROM orders
      WHERE order_number = $1`,
@@ -124,7 +202,117 @@ async function getOrderDetail(orderNumber) {
     [order.id]
   );
 
-  return { order, items: itemsResult.rows, payments: paymentsResult.rows };
+  const historyResult = await pool.query(
+    `SELECT id, from_status, to_status, created_at
+     FROM order_status_history
+     WHERE order_id = $1
+     ORDER BY created_at ASC`,
+    [order.id]
+  );
+
+  return {
+    order,
+    items: itemsResult.rows,
+    payments: paymentsResult.rows,
+    statusHistory: historyResult.rows,
+  };
+}
+
+// Admin-driven fulfillment advancement. Only two forward transitions are
+// allowed, each from exactly one required prior status -- this is not a
+// general order-editing endpoint:
+//   processing -> shipped   (requires trackingCarrier + trackingNumber)
+//   shipped    -> delivered
+// Cancellation and resolving paid_fulfillment_blocked orders are out of
+// scope here (handled elsewhere, or not yet built).
+const REQUIRED_PRIOR_STATUS = {
+  shipped: "processing",
+  delivered: "shipped",
+};
+
+async function updateOrderFulfillment(orderNumber, { status, trackingCarrier, trackingNumber }) {
+  if (!Object.prototype.hasOwnProperty.call(REQUIRED_PRIOR_STATUS, status)) {
+    return { ok: false, httpStatus: 400, message: "Invalid status transition" };
+  }
+
+  let carrier = null;
+  let number = null;
+
+  if (status === "shipped") {
+    carrier = String(trackingCarrier || "").trim();
+    number = String(trackingNumber || "").trim();
+
+    if (!carrier || !number) {
+      return {
+        ok: false,
+        httpStatus: 400,
+        message: "Tracking carrier and tracking number are required to mark an order as shipped",
+      };
+    }
+
+    if (carrier.length > 100 || number.length > 100) {
+      return { ok: false, httpStatus: 400, message: "Tracking carrier/number is too long" };
+    }
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const orderResult = await client.query(
+      `SELECT id, status FROM orders WHERE order_number = $1 FOR UPDATE`,
+      [orderNumber]
+    );
+
+    if (orderResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return { ok: false, httpStatus: 404, message: "Order not found" };
+    }
+
+    const order = orderResult.rows[0];
+    const requiredPrior = REQUIRED_PRIOR_STATUS[status];
+
+    if (order.status !== requiredPrior) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        httpStatus: 409,
+        message: `Cannot mark order as ${status} -- current status is ${order.status}, expected ${requiredPrior}`,
+      };
+    }
+
+    const updateResult =
+      status === "shipped"
+        ? await client.query(
+            `UPDATE orders
+             SET status = $1, tracking_carrier = $2, tracking_number = $3, updated_at = NOW()
+             WHERE id = $4
+             RETURNING id, order_number, status, tracking_carrier, tracking_number, updated_at`,
+            [status, carrier, number, order.id]
+          )
+        : await client.query(
+            `UPDATE orders
+             SET status = $1, updated_at = NOW()
+             WHERE id = $2
+             RETURNING id, order_number, status, tracking_carrier, tracking_number, updated_at`,
+            [status, order.id]
+          );
+
+    await client.query(
+      `INSERT INTO order_status_history (order_id, from_status, to_status) VALUES ($1, $2, $3)`,
+      [order.id, order.status, status]
+    );
+
+    await client.query("COMMIT");
+
+    return { ok: true, order: updateResult.rows[0] };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function getDashboardSummary() {
@@ -165,7 +353,10 @@ async function getDashboardSummary() {
 module.exports = {
   listAllProducts,
   listAllCategories,
+  createCategory,
+  setCategoryActive,
   listOrders,
   getOrderDetail,
+  updateOrderFulfillment,
   getDashboardSummary,
 };

@@ -45,6 +45,11 @@ app.use("/api/checkout", require("./routes/checkout.routes"));
 app.use("/api/orders", require("./routes/order.routes"));
 app.use("/api/payments", require("./routes/payment.routes"));
 app.use("/api/auth", require("./routes/auth.routes"));
+// Registered before /api/admin: Express matches app.use() prefixes in
+// registration order, and /api/admin/products/import is a sub-path of
+// /api/admin -- mounting the more specific router first means a request
+// is handled by exactly one router's auth middleware, not both.
+app.use("/api/admin/products/import", require("./routes/admin-import.routes"));
 app.use("/api/admin", require("./routes/admin.routes"));
 
 // 404 handler

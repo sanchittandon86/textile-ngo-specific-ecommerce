@@ -78,6 +78,13 @@ export interface AdminPaymentAttempt {
   created_at: string;
 }
 
+export interface AdminOrderStatusEvent {
+  id: string;
+  from_status: string | null;
+  to_status: string;
+  created_at: string;
+}
+
 export interface AdminOrderDetail {
   order: {
     id: string;
@@ -99,11 +106,14 @@ export interface AdminOrderDetail {
     discount_amount: string;
     total_amount: string;
     currency: string;
+    tracking_carrier: string | null;
+    tracking_number: string | null;
     created_at: string;
     updated_at: string;
   };
   items: AdminOrderItem[];
   payments: AdminPaymentAttempt[];
+  statusHistory: AdminOrderStatusEvent[];
 }
 
 export interface DashboardSummary {
@@ -148,6 +158,26 @@ export async function listAdminCategories(): Promise<AdminCategory[]> {
   return payload.data;
 }
 
+export async function createCategory(name: string, imageUrl?: string): Promise<AdminCategory> {
+  const response = await authenticatedFetch(`${API_URL}/categories`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, imageUrl: imageUrl || undefined }),
+  });
+  const payload = await parse<{ data: AdminCategory }>(response);
+  return payload.data;
+}
+
+export async function setCategoryActive(id: string, isActive: boolean): Promise<AdminCategory> {
+  const response = await authenticatedFetch(`${API_URL}/categories/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ isActive }),
+  });
+  const payload = await parse<{ data: AdminCategory }>(response);
+  return payload.data;
+}
+
 export async function listAdminOrders(params: {
   page?: number;
   limit?: number;
@@ -170,5 +200,37 @@ export async function getAdminOrderDetail(orderNumber: string): Promise<AdminOrd
     `${API_URL}/orders/${encodeURIComponent(orderNumber)}`
   );
   const payload = await parse<{ data: AdminOrderDetail }>(response);
+  return payload.data;
+}
+
+export async function markOrderShipped(
+  orderNumber: string,
+  trackingCarrier: string,
+  trackingNumber: string
+): Promise<AdminOrderDetail["order"]> {
+  const response = await authenticatedFetch(
+    `${API_URL}/orders/${encodeURIComponent(orderNumber)}/status`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "shipped", trackingCarrier, trackingNumber }),
+    }
+  );
+  const payload = await parse<{ data: AdminOrderDetail["order"] }>(response);
+  return payload.data;
+}
+
+export async function markOrderDelivered(
+  orderNumber: string
+): Promise<AdminOrderDetail["order"]> {
+  const response = await authenticatedFetch(
+    `${API_URL}/orders/${encodeURIComponent(orderNumber)}/status`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "delivered" }),
+    }
+  );
+  const payload = await parse<{ data: AdminOrderDetail["order"] }>(response);
   return payload.data;
 }
