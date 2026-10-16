@@ -39,6 +39,7 @@ describe("Admin Read-Only APIs", () => {
   test("every admin route rejects a missing access token with 401, no DB call", async () => {
     const routes = [
       "/api/admin/dashboard/summary",
+      "/api/admin/analytics",
       "/api/admin/products",
       "/api/admin/categories",
       "/api/admin/orders",
@@ -71,6 +72,90 @@ describe("Admin Read-Only APIs", () => {
       expect(response.status).toBe(200);
       expect(response.body.data.orders.total).toBe(10);
       expect(response.body.data.paidRevenue).toBe("15490.00");
+    });
+  });
+
+  describe("GET /api/admin/analytics", () => {
+    // Pg's DATE parser returns a Date built from UTC date components
+    // matching the stored calendar date -- mirrored here so mocked rows
+    // look like what pool.query would really return.
+    function pgDate(isoDate) {
+      return new Date(`${isoDate}T00:00:00.000Z`);
+    }
+
+    function todayIST() {
+      return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+    }
+
+    test("rejects without an access token", async () => {
+      const response = await request(app).get("/api/admin/analytics");
+      expect(response.status).toBe(401);
+      expect(pool.query).not.toHaveBeenCalled();
+    });
+
+    test("rejects an unsupported days value with 400", async () => {
+      mockActiveSession();
+
+      const response = await request(app)
+        .get("/api/admin/analytics?days=15")
+        .set("Authorization", `Bearer ${adminToken()}`);
+
+      expect(response.status).toBe(400);
+      expect(pool.query).toHaveBeenCalledTimes(1); // only the session check
+    });
+
+    test("defaults to 30 days and zero-fills days with no activity", async () => {
+      mockActiveSession();
+      const today = todayIST();
+      pool.query
+        .mockResolvedValueOnce({ rows: [{ day: pgDate(today), revenue: "500.00" }] })
+        .mockResolvedValueOnce({ rows: [{ day: pgDate(today), count: 2 }] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              product_id: 7,
+              product_name: "Hand Block Print Tote Bag",
+              product_slug: "hand-block-print-tote-bag",
+              quantity_sold: 3,
+              revenue: "2697.00",
+            },
+          ],
+        });
+
+      const response = await request(app)
+        .get("/api/admin/analytics")
+        .set("Authorization", `Bearer ${adminToken()}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.days).toBe(30);
+      expect(response.body.data.revenueByDay).toHaveLength(30);
+      expect(response.body.data.ordersByDay).toHaveLength(30);
+
+      const todayRevenueEntry = response.body.data.revenueByDay.find((d) => d.date === today);
+      expect(todayRevenueEntry.revenue).toBe("500.00");
+
+      const zeroDay = response.body.data.revenueByDay.find((d) => d.date !== today);
+      expect(zeroDay.revenue).toBe("0.00");
+
+      expect(response.body.data.topProducts[0].name).toBe("Hand Block Print Tote Bag");
+      expect(response.body.data.topProducts[0].quantitySold).toBe(3);
+    });
+
+    test("accepts days=7", async () => {
+      mockActiveSession();
+      pool.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      const response = await request(app)
+        .get("/api/admin/analytics?days=7")
+        .set("Authorization", `Bearer ${adminToken()}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.days).toBe(7);
+      expect(response.body.data.revenueByDay).toHaveLength(7);
+      expect(response.body.data.topProducts).toEqual([]);
     });
   });
 

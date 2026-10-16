@@ -135,9 +135,30 @@ export interface Pagination {
   totalPages: number;
 }
 
+export type AnalyticsDays = 7 | 30 | 90;
+
+export interface AnalyticsData {
+  days: AnalyticsDays;
+  revenueByDay: { date: string; revenue: string }[];
+  ordersByDay: { date: string; count: number }[];
+  topProducts: {
+    productId: string | null;
+    name: string;
+    slug: string | null;
+    quantitySold: number;
+    revenue: string;
+  }[];
+}
+
 export async function getDashboardSummary(): Promise<DashboardSummary> {
   const response = await authenticatedFetch(`${API_URL}/dashboard/summary`);
   const payload = await parse<{ data: DashboardSummary }>(response);
+  return payload.data;
+}
+
+export async function getAnalytics(days: AnalyticsDays): Promise<AnalyticsData> {
+  const response = await authenticatedFetch(`${API_URL}/analytics?days=${days}`);
+  const payload = await parse<{ data: AnalyticsData }>(response);
   return payload.data;
 }
 

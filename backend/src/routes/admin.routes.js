@@ -24,6 +24,31 @@ router.get("/dashboard/summary", async (req, res) => {
   }
 });
 
+const ANALYTICS_DAYS_VALUES = [7, 30, 90];
+
+router.get("/analytics", async (req, res) => {
+  const days = Number(req.query.days || 30);
+
+  if (!ANALYTICS_DAYS_VALUES.includes(days)) {
+    return res.status(400).json({
+      success: false,
+      message: "days must be one of 7, 30, 90",
+    });
+  }
+
+  try {
+    const analytics = await adminService.getAnalytics({ days });
+    return res.status(200).json({ success: true, data: analytics });
+  } catch (error) {
+    console.error("Fetch admin analytics failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch analytics",
+    });
+  }
+});
+
 router.get("/products", async (req, res) => {
   const page = Number(req.query.page || 1);
   const limit = Number(req.query.limit || 20);

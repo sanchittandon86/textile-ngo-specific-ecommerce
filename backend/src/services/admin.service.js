@@ -350,6 +350,97 @@ async function getDashboardSummary() {
   };
 }
 
+const ANALYTICS_DAYS_VALUES = [7, 30, 90];
+
+// Builds a contiguous calendar-day series ending today, anchored to the
+// same Asia/Kolkata calendar day the DB session timezone uses for
+// DATE(...) in the queries below -- deliberately not just `new Date()`,
+// since the Node process's own timezone may not be IST and could shift
+// the series by a day near midnight. India has no DST, so UTC-based day
+// arithmetic on an IST-anchored date string stays calendar-correct.
+function buildDaySeries(days) {
+  const todayIST = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(
+    new Date()
+  );
+  const anchor = new Date(`${todayIST}T00:00:00Z`);
+
+  const series = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(anchor);
+    d.setUTCDate(d.getUTCDate() - i);
+    series.push(d.toISOString().slice(0, 10));
+  }
+
+  return series;
+}
+
+async function getAnalytics({ days }) {
+  const resolvedDays = ANALYTICS_DAYS_VALUES.includes(days) ? days : 30;
+
+  const [revenueResult, ordersResult, topProductsResult] = await Promise.all([
+    // Revenue is bucketed by payment verification time, not order
+    // creation time -- an order can be placed on one day and paid
+    // (or never paid) on another, and only actual captured payments
+    // represent real revenue.
+    pool.query(
+      `SELECT DATE(verified_at) AS day, SUM(amount)::numeric(12,2) AS revenue
+       FROM payments
+       WHERE status = 'captured' AND verified_at >= NOW() - ($1 || ' days')::interval
+       GROUP BY DATE(verified_at)`,
+      [resolvedDays]
+    ),
+    // Orders trend counts every order placed (any status) -- this
+    // tracks storefront activity, separately from revenue above.
+    pool.query(
+      `SELECT DATE(created_at) AS day, COUNT(*)::int AS count
+       FROM orders
+       WHERE created_at >= NOW() - ($1 || ' days')::interval
+       GROUP BY DATE(created_at)`,
+      [resolvedDays]
+    ),
+    pool.query(
+      `SELECT oi.product_id, oi.product_name, oi.product_slug,
+              SUM(oi.quantity)::int AS quantity_sold,
+              SUM(oi.line_total)::numeric(12,2) AS revenue
+       FROM order_items oi
+       JOIN orders o ON o.id = oi.order_id
+       WHERE o.payment_status = 'paid' AND o.created_at >= NOW() - ($1 || ' days')::interval
+       GROUP BY oi.product_id, oi.product_name, oi.product_slug
+       ORDER BY revenue DESC
+       LIMIT 5`,
+      [resolvedDays]
+    ),
+  ]);
+
+  const revenueByDate = new Map(
+    revenueResult.rows.map((r) => [r.day.toISOString().slice(0, 10), r.revenue])
+  );
+  const ordersByDate = new Map(
+    ordersResult.rows.map((r) => [r.day.toISOString().slice(0, 10), r.count])
+  );
+
+  const daySeries = buildDaySeries(resolvedDays);
+
+  return {
+    days: resolvedDays,
+    revenueByDay: daySeries.map((date) => ({
+      date,
+      revenue: revenueByDate.get(date) ?? "0.00",
+    })),
+    ordersByDay: daySeries.map((date) => ({
+      date,
+      count: ordersByDate.get(date) ?? 0,
+    })),
+    topProducts: topProductsResult.rows.map((row) => ({
+      productId: row.product_id,
+      name: row.product_name,
+      slug: row.product_slug,
+      quantitySold: row.quantity_sold,
+      revenue: row.revenue,
+    })),
+  };
+}
+
 module.exports = {
   listAllProducts,
   listAllCategories,
@@ -359,4 +450,5 @@ module.exports = {
   getOrderDetail,
   updateOrderFulfillment,
   getDashboardSummary,
+  getAnalytics,
 };
