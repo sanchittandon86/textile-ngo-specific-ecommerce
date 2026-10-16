@@ -3,12 +3,18 @@ jest.mock("../src/config/db", () => ({
   connect: jest.fn(),
 }));
 
+jest.mock("../src/services/cloudinary.service", () => ({
+  uploadCategoryImage: jest.fn(),
+  deleteCategoryImage: jest.fn(),
+}));
+
 process.env.JWT_SECRET = "test_jwt_secret";
 process.env.JWT_REFRESH_SECRET = "test_jwt_refresh_secret";
 
 const jwt = require("jsonwebtoken");
 const request = require("supertest");
 const pool = require("../src/config/db");
+const { uploadCategoryImage, deleteCategoryImage } = require("../src/services/cloudinary.service");
 const app = require("../src/app");
 
 function adminToken() {
@@ -111,6 +117,156 @@ describe("Admin Read-Only APIs", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.data[0].is_active).toBe(false);
+    });
+  });
+
+  describe("POST /api/admin/categories", () => {
+    test("rejects without an access token", async () => {
+      const response = await request(app).post("/api/admin/categories").send({ name: "Scarves" });
+      expect(response.status).toBe(401);
+      expect(pool.query).not.toHaveBeenCalled();
+    });
+
+    test("rejects a missing name with 400, no DB call", async () => {
+      mockActiveSession();
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "   " });
+
+      expect(response.status).toBe(400);
+      expect(pool.query).toHaveBeenCalledTimes(1); // only the session check
+    });
+
+    test("rejects a duplicate category (matched by normalized slug)", async () => {
+      mockActiveSession();
+      pool.query.mockResolvedValueOnce({ rows: [{ id: 3 }] }); // existing slug match
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "  Bags  " });
+
+      expect(response.status).toBe(409);
+      expect(uploadCategoryImage).not.toHaveBeenCalled();
+    });
+
+    test("creates a category without an image", async () => {
+      mockActiveSession();
+      pool.query
+        .mockResolvedValueOnce({ rows: [] }) // no existing slug
+        .mockResolvedValueOnce({
+          rows: [{ id: 9, name: "Scarves", slug: "scarves", image_url: null, is_active: true }],
+        });
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "Scarves" });
+
+      expect(response.status).toBe(201);
+      expect(response.body.data.slug).toBe("scarves");
+      expect(uploadCategoryImage).not.toHaveBeenCalled();
+    });
+
+    test("creates a category with an image, uploading via Cloudinary", async () => {
+      mockActiveSession();
+      uploadCategoryImage.mockResolvedValueOnce({
+        secureUrl: "https://res.cloudinary.com/demo/image/upload/v1/textile-store/categories/scarves/image.jpg",
+        publicId: "textile-store/categories/scarves/image",
+      });
+      pool.query
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [{ id: 9, name: "Scarves", slug: "scarves", image_url: "https://res.cloudinary.com/x.jpg", is_active: true }],
+        });
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "Scarves", imageUrl: "https://example.com/scarf.jpg" });
+
+      expect(response.status).toBe(201);
+      expect(uploadCategoryImage).toHaveBeenCalledWith("https://example.com/scarf.jpg", { slug: "scarves" });
+    });
+
+    test("returns 502 and skips the DB insert when the Cloudinary upload fails", async () => {
+      mockActiveSession();
+      pool.query.mockResolvedValueOnce({ rows: [] }); // no existing slug
+      uploadCategoryImage.mockRejectedValueOnce(new Error("cloudinary down"));
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "Scarves", imageUrl: "https://example.com/scarf.jpg" });
+
+      expect(response.status).toBe(502);
+      expect(pool.query).toHaveBeenCalledTimes(2); // session check + slug lookup only
+    });
+
+    test("cleans up the uploaded Cloudinary asset if the DB insert fails", async () => {
+      mockActiveSession();
+      uploadCategoryImage.mockResolvedValueOnce({
+        secureUrl: "https://res.cloudinary.com/demo/image/upload/v1/textile-store/categories/scarves/image.jpg",
+        publicId: "textile-store/categories/scarves/image",
+      });
+      pool.query
+        .mockResolvedValueOnce({ rows: [] }) // no existing slug
+        .mockRejectedValueOnce(new Error("insert failed")); // DB insert itself fails
+
+      const response = await request(app)
+        .post("/api/admin/categories")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ name: "Scarves", imageUrl: "https://example.com/scarf.jpg" });
+
+      expect(response.status).toBe(500);
+      expect(deleteCategoryImage).toHaveBeenCalledWith("textile-store/categories/scarves/image");
+    });
+  });
+
+  describe("PATCH /api/admin/categories/:id/status", () => {
+    test("rejects without an access token", async () => {
+      const response = await request(app).patch("/api/admin/categories/3/status").send({ isActive: false });
+      expect(response.status).toBe(401);
+    });
+
+    test("rejects a non-boolean isActive with 400", async () => {
+      mockActiveSession();
+
+      const response = await request(app)
+        .patch("/api/admin/categories/3/status")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ isActive: "false" });
+
+      expect(response.status).toBe(400);
+    });
+
+    test("deactivates a category", async () => {
+      mockActiveSession();
+      pool.query.mockResolvedValueOnce({
+        rows: [{ id: 3, name: "Bags", slug: "bags", is_active: false }],
+      });
+
+      const response = await request(app)
+        .patch("/api/admin/categories/3/status")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ isActive: false });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.is_active).toBe(false);
+    });
+
+    test("returns 404 for an unknown category id", async () => {
+      mockActiveSession();
+      pool.query.mockResolvedValueOnce({ rows: [] });
+
+      const response = await request(app)
+        .patch("/api/admin/categories/999/status")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send({ isActive: true });
+
+      expect(response.status).toBe(404);
     });
   });
 

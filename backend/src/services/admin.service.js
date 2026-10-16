@@ -1,8 +1,11 @@
-// Admin data access, plus order fulfillment status advancement. Unlike
-// the public product/category APIs, reads here intentionally include
+// Admin data access, plus a small set of admin-driven mutations
+// (fulfillment status advancement, category create/activate). Unlike the
+// public product/category APIs, reads here intentionally include
 // unpublished products and inactive categories, since admins need to
 // see everything.
 const pool = require("../config/db");
+const { normalizeCategoryValue } = require("./product-import.service");
+const { uploadCategoryImage, deleteCategoryImage } = require("./cloudinary.service");
 
 async function listAllProducts({ page, limit }) {
   const offset = (page - 1) * limit;
@@ -32,6 +35,81 @@ async function listAllCategories() {
   );
 
   return result.rows;
+}
+
+// Create-only (no rename/edit) -- matches the bulk-import rule that
+// categories are never silently renamed. imageUrl, if given, is a
+// source URL the admin supplies; Cloudinary fetches it server-side and
+// we store the returned secure_url, never the raw input, as image_url.
+async function createCategory({ name, imageUrl }) {
+  const trimmedName = String(name || "").trim();
+
+  if (!trimmedName) {
+    return { ok: false, httpStatus: 400, message: "Category name is required" };
+  }
+
+  if (trimmedName.length > 150) {
+    return { ok: false, httpStatus: 400, message: "Category name is too long" };
+  }
+
+  const slug = normalizeCategoryValue(trimmedName);
+
+  if (!slug) {
+    return { ok: false, httpStatus: 400, message: "Category name must contain at least one letter or number" };
+  }
+
+  const existing = await pool.query(`SELECT id FROM categories WHERE slug = $1`, [slug]);
+  if (existing.rows.length > 0) {
+    return { ok: false, httpStatus: 409, message: `A category matching "${trimmedName}" already exists` };
+  }
+
+  let resolvedImageUrl = null;
+  let uploadedPublicId = null;
+
+  const trimmedImageUrl = String(imageUrl || "").trim();
+  if (trimmedImageUrl) {
+    try {
+      const uploaded = await uploadCategoryImage(trimmedImageUrl, { slug });
+      resolvedImageUrl = uploaded.secureUrl;
+      uploadedPublicId = uploaded.publicId;
+    } catch (error) {
+      console.error("Category image upload failed:", error.message);
+      return { ok: false, httpStatus: 502, message: "Unable to upload the category image" };
+    }
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO categories (name, slug, image_url, is_active)
+       VALUES ($1, $2, $3, TRUE)
+       RETURNING id, name, slug, image_url, is_active, created_at`,
+      [trimmedName, slug, resolvedImageUrl]
+    );
+
+    return { ok: true, category: result.rows[0] };
+  } catch (error) {
+    // Image already landed in Cloudinary -- don't leave it orphaned if
+    // the DB insert fails for any reason (e.g. a race on the slug
+    // uniqueness check above).
+    if (uploadedPublicId) {
+      await deleteCategoryImage(uploadedPublicId);
+    }
+    throw error;
+  }
+}
+
+async function setCategoryActive(id, isActive) {
+  const result = await pool.query(
+    `UPDATE categories SET is_active = $1 WHERE id = $2
+     RETURNING id, name, slug, image_url, is_active, created_at`,
+    [isActive, id]
+  );
+
+  if (result.rows.length === 0) {
+    return { ok: false, httpStatus: 404, message: "Category not found" };
+  }
+
+  return { ok: true, category: result.rows[0] };
 }
 
 const ORDER_STATUS_VALUES = [
@@ -275,6 +353,8 @@ async function getDashboardSummary() {
 module.exports = {
   listAllProducts,
   listAllCategories,
+  createCategory,
+  setCategoryActive,
   listOrders,
   getOrderDetail,
   updateOrderFulfillment,

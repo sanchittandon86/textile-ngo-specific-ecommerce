@@ -16,6 +16,14 @@ function buildFolder(sku) {
   return `textile-store/products/${sku}`;
 }
 
+function buildCategoryFolder(slug) {
+  if (!SKU_FOR_PATH_PATTERN.test(slug)) {
+    throw new Error(`Refusing to build a Cloudinary path from unsafe category slug: ${slug}`);
+  }
+
+  return `textile-store/categories/${slug}`;
+}
+
 // Fetches `sourceUrl` (Cloudinary does the fetching server-side) and
 // stores it under a deterministic, server-constructed path -- the
 // client/Excel never supplies a Cloudinary path directly, only the sku
@@ -33,12 +41,28 @@ async function uploadProductImage(sourceUrl, { sku, slot }) {
   return { secureUrl: result.secure_url, publicId: result.public_id };
 }
 
+// One image per category, same deterministic-path/overwrite approach as
+// products -- re-creating a category with the same slug (after a prior
+// deactivation, say) safely replaces rather than orphans the old asset.
+async function uploadCategoryImage(sourceUrl, { slug }) {
+  const cloudinary = getCloudinary();
+
+  const result = await cloudinary.uploader.upload(sourceUrl, {
+    folder: buildCategoryFolder(slug),
+    public_id: "image",
+    overwrite: true,
+    resource_type: "image",
+  });
+
+  return { secureUrl: result.secure_url, publicId: result.public_id };
+}
+
 // Best-effort delete, used both for normal image replacement and for
-// cleaning up orphaned uploads after a failed import. Never throws --
-// callers are already in a cleanup/error path and a failed delete here
-// shouldn't mask or interrupt it (Cloudinary's dashboard can always
-// clean up an orphaned asset manually as a last resort).
-async function deleteProductImage(publicId) {
+// cleaning up orphaned uploads after a failed import/create. Never
+// throws -- callers are already in a cleanup/error path and a failed
+// delete here shouldn't mask or interrupt it (Cloudinary's dashboard
+// can always clean up an orphaned asset manually as a last resort).
+async function deleteCloudinaryAsset(publicId) {
   try {
     const cloudinary = getCloudinary();
     await cloudinary.uploader.destroy(publicId, { resource_type: "image" });
@@ -47,4 +71,11 @@ async function deleteProductImage(publicId) {
   }
 }
 
-module.exports = { uploadProductImage, deleteProductImage, buildFolder };
+module.exports = {
+  uploadProductImage,
+  uploadCategoryImage,
+  deleteProductImage: deleteCloudinaryAsset,
+  deleteCategoryImage: deleteCloudinaryAsset,
+  buildFolder,
+  buildCategoryFolder,
+};
