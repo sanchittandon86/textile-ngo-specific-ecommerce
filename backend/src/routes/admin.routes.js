@@ -1,5 +1,6 @@
-// Read-only admin endpoints. Every route here requires a valid admin
-// access token (authMiddleware, applied once for the whole router).
+// Admin endpoints. Every route here requires a valid admin access token
+// (authMiddleware, applied once for the whole router). Mostly
+// read-only; the exception is order fulfillment advancement below.
 const express = require("express");
 const authMiddleware = require("../middleware/auth.middleware");
 const adminService = require("../services/admin.service");
@@ -117,6 +118,37 @@ router.get("/orders/:orderNumber", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to fetch order",
+    });
+  }
+});
+
+// Advances an order's fulfillment status. Only processing->shipped
+// (with tracking info) and shipped->delivered are accepted -- see
+// updateOrderFulfillment in admin.service.js for the exact rules.
+router.patch("/orders/:orderNumber/status", async (req, res) => {
+  const { status, trackingCarrier, trackingNumber } = req.body || {};
+
+  try {
+    const result = await adminService.updateOrderFulfillment(req.params.orderNumber, {
+      status,
+      trackingCarrier,
+      trackingNumber,
+    });
+
+    if (!result.ok) {
+      return res.status(result.httpStatus).json({
+        success: false,
+        message: result.message,
+      });
+    }
+
+    return res.status(200).json({ success: true, data: result.order });
+  } catch (error) {
+    console.error("Update order fulfillment failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to update order status",
     });
   }
 });

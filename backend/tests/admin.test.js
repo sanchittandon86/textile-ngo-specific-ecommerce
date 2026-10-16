@@ -162,14 +162,17 @@ describe("Admin Read-Only APIs", () => {
       expect(response.status).toBe(404);
     });
 
-    test("returns order detail with items and payment attempts", async () => {
+    test("returns order detail with items, payment attempts, and status history", async () => {
       mockActiveSession();
       pool.query
         .mockResolvedValueOnce({
           rows: [{ id: 5, order_number: "ORD-20261013-ABCDEF0123", status: "processing" }],
         })
         .mockResolvedValueOnce({ rows: [{ product_name: "Cotton Bedsheet", quantity: 2 }] })
-        .mockResolvedValueOnce({ rows: [{ status: "captured", razorpay_payment_id: "pay_123" }] });
+        .mockResolvedValueOnce({ rows: [{ status: "captured", razorpay_payment_id: "pay_123" }] })
+        .mockResolvedValueOnce({
+          rows: [{ from_status: "pending_payment", to_status: "processing" }],
+        });
 
       const response = await request(app)
         .get("/api/admin/orders/ORD-20261013-ABCDEF0123")
@@ -179,6 +182,133 @@ describe("Admin Read-Only APIs", () => {
       expect(response.body.data.order.order_number).toBe("ORD-20261013-ABCDEF0123");
       expect(response.body.data.items).toHaveLength(1);
       expect(response.body.data.payments[0].status).toBe("captured");
+      expect(response.body.data.statusHistory[0].to_status).toBe("processing");
+    });
+  });
+
+  describe("PATCH /api/admin/orders/:orderNumber/status", () => {
+    function setupClient(currentStatus) {
+      const calls = [];
+      const client = {
+        query: jest.fn(async (sql, params = []) => {
+          calls.push({ sql, params });
+          if (sql.includes("FOR UPDATE")) {
+            return { rows: [{ id: 5, status: currentStatus }] };
+          }
+          if (sql.startsWith("UPDATE orders")) {
+            return {
+              rows: [
+                {
+                  id: 5,
+                  order_number: "ORD-20261013-ABCDEF0123",
+                  status: params[0],
+                  tracking_carrier: params.length > 3 ? params[1] : null,
+                  tracking_number: params.length > 3 ? params[2] : null,
+                },
+              ],
+            };
+          }
+          return {};
+        }),
+        release: jest.fn(),
+      };
+      pool.connect.mockResolvedValueOnce(client);
+      return { client, calls };
+    }
+
+    function patch(body) {
+      return request(app)
+        .patch("/api/admin/orders/ORD-20261013-ABCDEF0123/status")
+        .set("Authorization", `Bearer ${adminToken()}`)
+        .send(body);
+    }
+
+    test("rejects without an access token", async () => {
+      const response = await request(app)
+        .patch("/api/admin/orders/ORD-20261013-ABCDEF0123/status")
+        .send({ status: "shipped", trackingCarrier: "BlueDart", trackingNumber: "BD123" });
+
+      expect(response.status).toBe(401);
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    test("rejects an unsupported target status with 400, no DB transaction opened", async () => {
+      mockActiveSession();
+
+      const response = await patch({ status: "delivered_wrong" });
+
+      expect(response.status).toBe(400);
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    test("rejects processing -> shipped without tracking info", async () => {
+      mockActiveSession();
+
+      const response = await patch({ status: "shipped" });
+
+      expect(response.status).toBe(400);
+      expect(pool.connect).not.toHaveBeenCalled();
+    });
+
+    test("marks a processing order as shipped and records tracking + history", async () => {
+      mockActiveSession();
+      const { client, calls } = setupClient("processing");
+
+      const response = await patch({
+        status: "shipped",
+        trackingCarrier: "BlueDart",
+        trackingNumber: "BD123456789",
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.status).toBe("shipped");
+      expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(
+        calls.some(
+          (c) =>
+            c.sql.startsWith("INSERT INTO order_status_history") &&
+            c.params[1] === "processing" &&
+            c.params[2] === "shipped"
+        )
+      ).toBe(true);
+    });
+
+    test("marks a shipped order as delivered", async () => {
+      mockActiveSession();
+      const { client } = setupClient("shipped");
+
+      const response = await patch({ status: "delivered" });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.status).toBe("delivered");
+      expect(client.query).toHaveBeenCalledWith("COMMIT");
+    });
+
+    test("rejects shipping an order that is not currently processing", async () => {
+      mockActiveSession();
+      const { client } = setupClient("pending_payment");
+
+      const response = await patch({
+        status: "shipped",
+        trackingCarrier: "BlueDart",
+        trackingNumber: "BD123",
+      });
+
+      expect(response.status).toBe(409);
+      expect(client.query).toHaveBeenCalledWith("ROLLBACK");
+    });
+
+    test("returns 404 for an unknown order number", async () => {
+      mockActiveSession();
+      const client = {
+        query: jest.fn(async (sql) => (sql.includes("FOR UPDATE") ? { rows: [] } : {})),
+        release: jest.fn(),
+      };
+      pool.connect.mockResolvedValueOnce(client);
+
+      const response = await patch({ status: "delivered" });
+
+      expect(response.status).toBe(404);
     });
   });
 });
