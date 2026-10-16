@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { listAdminProducts, type AdminProduct, type Pagination } from "@/lib/api/admin";
 import { formatMoney } from "@/lib/format";
 
@@ -31,7 +32,19 @@ export default function AdminProductsPage() {
 
   return (
     <div>
-      <h1 className="font-serif text-2xl text-ink">Products</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="font-serif text-2xl text-ink">Products</h1>
+        <Link
+          href="/admin/products/import"
+          className="border border-olive-700 px-4 py-2 text-xs font-medium tracking-[0.12em] text-olive-800 uppercase transition-colors hover:bg-olive-700 hover:text-ivory"
+        >
+          Bulk Import
+        </Link>
+      </div>
+      <p className="mt-1 text-sm text-ink-muted">
+        Products are managed only through Excel bulk import -- there is no individual
+        product form.
+      </p>
 
       {error && <p className="mt-4 text-sm text-terracotta-600">{error}</p>}
 
