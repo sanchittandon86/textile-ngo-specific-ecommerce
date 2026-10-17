@@ -1,4 +1,5 @@
 const express = require("express");
+const createRateLimiter = require("../middleware/rateLimit.middleware");
 const {
   createPaymentOrder,
   verifyPayment,
@@ -7,10 +8,21 @@ const {
 
 const router = express.Router();
 
+// Deliberately not applied to /webhook below -- that's a
+// server-to-server call from Razorpay's infrastructure, and dropping a
+// legitimate webhook delivery (or a retry after a transient failure)
+// because of an IP-based limit would silently break payment
+// confirmation, not just slow down an attacker.
+const paymentLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: "Too many payment requests from this address. Please try again later.",
+});
+
 // POST /api/payments/create-order - create (or resume) a Razorpay order
 // for an existing, unpaid guest order. Guest-authenticated the same way
 // as GET /api/orders/:orderNumber: order number + X-Order-Token.
-router.post("/create-order", async (req, res) => {
+router.post("/create-order", paymentLimiter, async (req, res) => {
   const orderNumber = String(req.body?.orderNumber || "").trim();
   const orderToken = req.header("X-Order-Token");
 
@@ -41,7 +53,7 @@ router.post("/create-order", async (req, res) => {
 // POST /api/payments/verify - verify a completed Razorpay Checkout
 // payment. Never trusts the frontend success callback alone; the
 // signature is independently recomputed from the key secret server-side.
-router.post("/verify", async (req, res) => {
+router.post("/verify", paymentLimiter, async (req, res) => {
   const orderNumber = String(req.body?.orderNumber || "").trim();
   const orderToken = req.header("X-Order-Token");
 

@@ -1,5 +1,6 @@
 const express = require("express");
 const pool = require("../config/db");
+const createRateLimiter = require("../middleware/rateLimit.middleware");
 const {
   mapOrderItemRow,
   findOrderByAccessToken,
@@ -7,12 +8,22 @@ const {
 
 const router = express.Router();
 
+// The order_token_hash itself makes brute-forcing computationally
+// infeasible (SHA-256 of a 256-bit random token), but this still limits
+// how fast someone can hammer the endpoint guessing order numbers/tokens
+// or just scraping order data.
+const orderLookupLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: "Too many order lookups from this address. Please try again later.",
+});
+
 // GET /api/orders/:orderNumber - guest order lookup.
 // Requires BOTH a well-formed order number AND the matching X-Order-Token.
 // Order number or database id alone is never sufficient -- see
 // findOrderByAccessToken in checkout.service.js, shared with the payments
 // endpoints so guest order access is authorized identically everywhere.
-router.get("/:orderNumber", async (req, res) => {
+router.get("/:orderNumber", orderLookupLimiter, async (req, res) => {
   const orderNumber = String(req.params.orderNumber || "").trim();
   const token = req.header("X-Order-Token");
 

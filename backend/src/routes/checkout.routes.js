@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../config/db");
 const guestCart = require("../middleware/guestCart");
+const createRateLimiter = require("../middleware/rateLimit.middleware");
 const { getCartSnapshot } = require("../services/cart.service");
 const {
   SHIPPING_FEE,
@@ -9,6 +10,12 @@ const {
 } = require("../services/checkout.service");
 
 const router = express.Router();
+
+const createOrderLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Too many orders created from this address. Please try again later.",
+});
 
 // GET /api/checkout/summary - preview only. Checkout itself re-fetches
 // prices/stock from the database and recalculates everything; nothing
@@ -56,7 +63,7 @@ router.get("/summary", guestCart, async (req, res) => {
 });
 
 // POST /api/checkout - create a guest order from the cart.
-router.post("/", guestCart, async (req, res) => {
+router.post("/", createOrderLimiter, guestCart, async (req, res) => {
   try {
     const result = await createGuestOrder(req.cartId, req.body);
 

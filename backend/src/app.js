@@ -1,10 +1,16 @@
 const express = require("express");
+const helmet = require("helmet");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 
 const app = express();
 
 // Middleware
+// helmet's default config (HSTS, X-Content-Type-Options, X-Frame-Options,
+// removing X-Powered-By, etc.) is safe as-is here -- this API never
+// serves HTML/browser-rendered content, so CSP has nothing to restrict.
+app.use(helmet());
+
 // credentials: true is required for the admin refresh-token cookie
 // (httpOnly, cross-port between the frontend and this API) to be sent
 // and accepted; it has no effect on the public guest APIs, which never
