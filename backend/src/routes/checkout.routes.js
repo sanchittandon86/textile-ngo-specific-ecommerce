@@ -8,6 +8,7 @@ const {
   CURRENCY,
   createGuestOrder,
 } = require("../services/checkout.service");
+const { sendOrderPlacedNotifications } = require("../services/notification.service");
 
 const router = express.Router();
 
@@ -75,6 +76,17 @@ router.post("/", createOrderLimiter, guestCart, async (req, res) => {
     }
 
     const { order, items, orderToken } = result;
+
+    // Fire-and-forget: the order transaction already committed inside
+    // createGuestOrder above. Never awaited and notification.service.js
+    // is designed to never throw/reject, so a slow or failing email/
+    // WhatsApp provider can never delay or fail this response.
+    sendOrderPlacedNotifications(order.id).catch((error) => {
+      // Belt-and-suspenders: notification.service.js is designed to
+      // never reject, but this guarantees a defect there can still
+      // never surface as an unhandled rejection or affect this response.
+      console.error("[notifications] sendOrderPlacedNotifications rejected unexpectedly:", error.message);
+    });
 
     return res.status(201).json({
       success: true,

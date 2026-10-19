@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const pool = require("../config/db");
 const { getRazorpay } = require("../config/razorpay");
 const { findOrderByAccessToken } = require("./checkout.service");
+const { sendPaymentSuccessNotifications } = require("./notification.service");
 
 const RAZORPAY_ORDER_ID_PATTERN = /^order_[A-Za-z0-9]+$/;
 const RAZORPAY_PAYMENT_ID_PATTERN = /^pay_[A-Za-z0-9]+$/;
@@ -149,6 +150,19 @@ async function capturePayment(paymentId, razorpayPaymentId) {
     );
 
     await client.query("COMMIT");
+
+    // Fire-and-forget, after commit -- this is the single choke point
+    // both POST /api/payments/verify and the Razorpay webhook funnel
+    // through, and this code path only runs once per real capture (the
+    // already-captured short-circuit above returns before reaching
+    // here), so a duplicate webhook delivery can never trigger this
+    // twice. Never awaited; notification.service.js never throws.
+    sendPaymentSuccessNotifications(order.id).catch((error) => {
+      // Belt-and-suspenders: notification.service.js is designed to
+      // never reject, but this guarantees a defect there can still
+      // never surface as an unhandled rejection or affect this response.
+      console.error("[notifications] sendPaymentSuccessNotifications rejected unexpectedly:", error.message);
+    });
 
     return {
       ok: true,

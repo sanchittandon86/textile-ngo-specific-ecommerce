@@ -6,6 +6,10 @@
 const pool = require("../config/db");
 const { normalizeCategoryValue } = require("./product-import.service");
 const { uploadCategoryImage, deleteCategoryImage } = require("./cloudinary.service");
+const {
+  sendOrderShippedNotifications,
+  sendOrderDeliveredNotifications,
+} = require("./notification.service");
 
 async function listAllProducts({ page, limit }) {
   const offset = (page - 1) * limit;
@@ -305,6 +309,20 @@ async function updateOrderFulfillment(orderNumber, { status, trackingCarrier, tr
     );
 
     await client.query("COMMIT");
+
+    // Fire-and-forget, after commit -- only reached on a genuine
+    // transition (the 409 above already rejects a repeat "mark as
+    // shipped/delivered" before any mutation happens), so this can never
+    // double-fire for the same order. Never awaited;
+    // notification.service.js never throws.
+    const notifyError = (error) =>
+      console.error("[notifications] order fulfillment notification rejected unexpectedly:", error.message);
+
+    if (status === "shipped") {
+      sendOrderShippedNotifications(order.id).catch(notifyError);
+    } else if (status === "delivered") {
+      sendOrderDeliveredNotifications(order.id).catch(notifyError);
+    }
 
     return { ok: true, order: updateResult.rows[0] };
   } catch (error) {

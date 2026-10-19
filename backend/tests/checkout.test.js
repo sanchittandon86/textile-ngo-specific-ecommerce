@@ -3,8 +3,19 @@ jest.mock("../src/config/db", () => ({
   connect: jest.fn(),
 }));
 
+// Notifications are fired-and-forget after the checkout transaction
+// commits (see checkout.routes.js). Mocked here so these integration
+// tests -- which precisely script pool.query's mocked resolutions for
+// the checkout flow itself -- aren't affected by the extra, unrelated
+// pool.query calls a real notification send would make. Covered
+// directly in notification.service.test.js instead.
+jest.mock("../src/services/notification.service", () => ({
+  sendOrderPlacedNotifications: jest.fn().mockResolvedValue(undefined),
+}));
+
 const request = require("supertest");
 const pool = require("../src/config/db");
+const { sendOrderPlacedNotifications } = require("../src/services/notification.service");
 const app = require("../src/app");
 
 const VALID_CART_TOKEN = "a".repeat(64);
@@ -122,6 +133,31 @@ describe("Guest Checkout APIs", () => {
         [1]
       );
       expect(client.release).toHaveBeenCalled();
+      expect(sendOrderPlacedNotifications).toHaveBeenCalledWith(42);
+    });
+
+    test("a notification failure never affects the order response -- checkout still succeeds and is never rolled back", async () => {
+      pool.query.mockResolvedValueOnce({ rows: [{ id: 1 }] }); // guestCart lookup
+
+      const client = makeClient();
+      pool.connect.mockResolvedValueOnce(client);
+      mockHappyPathQueries(client);
+
+      // Even if notification delivery rejects entirely, the order
+      // transaction already committed before this is ever called
+      // (fire-and-forget, not awaited) -- the HTTP response must be
+      // unaffected.
+      sendOrderPlacedNotifications.mockRejectedValueOnce(new Error("Resend and WhatsApp both down"));
+
+      const response = await request(app)
+        .post("/api/checkout")
+        .set("X-Cart-Token", VALID_CART_TOKEN)
+        .send(VALID_PAYLOAD);
+
+      expect(response.status).toBe(201);
+      expect(response.body.data.orderNumber).toBe("ORD-20261013-ABCDEF0123");
+      expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(client.query).not.toHaveBeenCalledWith("ROLLBACK");
     });
 
     test("rejects checkout with an empty cart", async () => {

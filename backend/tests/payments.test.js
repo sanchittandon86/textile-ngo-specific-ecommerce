@@ -7,10 +7,19 @@ jest.mock("../src/config/razorpay", () => ({
   getRazorpay: jest.fn(),
 }));
 
+// Fired-and-forget after capturePayment commits (see payments.service.js).
+// Mocked so these tests' precisely scripted pool.query mocks aren't
+// consumed by a real notification send. Covered directly in
+// notification.service.test.js instead.
+jest.mock("../src/services/notification.service", () => ({
+  sendPaymentSuccessNotifications: jest.fn().mockResolvedValue(undefined),
+}));
+
 const crypto = require("crypto");
 const request = require("supertest");
 const pool = require("../src/config/db");
 const { getRazorpay } = require("../src/config/razorpay");
+const { sendPaymentSuccessNotifications } = require("../src/services/notification.service");
 
 process.env.RAZORPAY_KEY_ID = "rzp_test_fakekeyid";
 process.env.RAZORPAY_KEY_SECRET = "test_key_secret";
@@ -201,9 +210,39 @@ describe("Razorpay Payment APIs", () => {
       expect(response.body.data.alreadyProcessed).toBe(false);
       expect(client.query).toHaveBeenCalledWith("COMMIT");
       expect(client.release).toHaveBeenCalled();
+      expect(sendPaymentSuccessNotifications).toHaveBeenCalledWith(1);
     });
 
-    test("duplicate verification requests are idempotent (second call short-circuits)", async () => {
+    test("a notification failure never affects the payment response -- capture is never rolled back", async () => {
+      pool.query
+        .mockResolvedValueOnce({ rows: [unpaidOrderRow()] })
+        .mockResolvedValueOnce({ rows: [{ id: 7, status: "created" }] });
+
+      const client = makeClient();
+      pool.connect.mockResolvedValueOnce(client);
+      mockCaptureHappyPath(client);
+
+      sendPaymentSuccessNotifications.mockRejectedValueOnce(new Error("Resend and WhatsApp both down"));
+
+      const signature = validPaymentSignature(RAZORPAY_ORDER_ID, RAZORPAY_PAYMENT_ID);
+
+      const response = await request(app)
+        .post("/api/payments/verify")
+        .set("X-Order-Token", VALID_ORDER_TOKEN)
+        .send({
+          orderNumber: ORDER_NUMBER,
+          razorpayOrderId: RAZORPAY_ORDER_ID,
+          razorpayPaymentId: RAZORPAY_PAYMENT_ID,
+          razorpaySignature: signature,
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.paymentStatus).toBe("paid");
+      expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(client.query).not.toHaveBeenCalledWith("ROLLBACK");
+    });
+
+    test("duplicate verification requests are idempotent (second call short-circuits, no duplicate notification)", async () => {
       pool.query
         .mockResolvedValueOnce({ rows: [unpaidOrderRow()] })
         .mockResolvedValueOnce({ rows: [{ id: 7, status: "captured" }] }); // already captured
@@ -223,6 +262,7 @@ describe("Razorpay Payment APIs", () => {
       expect(response.status).toBe(200);
       expect(response.body.data.alreadyProcessed).toBe(true);
       expect(pool.connect).not.toHaveBeenCalled();
+      expect(sendPaymentSuccessNotifications).not.toHaveBeenCalled();
     });
 
     test("rejects an invalid signature with 400 and marks the attempt failed", async () => {
@@ -358,6 +398,7 @@ describe("Razorpay Payment APIs", () => {
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
       expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(sendPaymentSuccessNotifications).toHaveBeenCalledWith(1);
     });
 
     test("rejects an invalid webhook signature with 400, without touching the DB", async () => {
@@ -391,6 +432,7 @@ describe("Razorpay Payment APIs", () => {
       expect(response.body.message).toMatch(/duplicate/i);
       expect(pool.connect).not.toHaveBeenCalled();
       expect(pool.query).toHaveBeenCalledTimes(1);
+      expect(sendPaymentSuccessNotifications).not.toHaveBeenCalled();
     });
 
     test("a failed-payment event never overwrites an already-captured payment", async () => {

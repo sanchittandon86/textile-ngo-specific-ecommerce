@@ -8,6 +8,15 @@ jest.mock("../src/services/cloudinary.service", () => ({
   deleteCategoryImage: jest.fn(),
 }));
 
+// Fired-and-forget after a genuine shipped/delivered transition commits
+// (see updateOrderFulfillment in admin.service.js). Mocked so these
+// tests' precisely scripted pool.query mocks aren't consumed by a real
+// notification send. Covered directly in notification.service.test.js.
+jest.mock("../src/services/notification.service", () => ({
+  sendOrderShippedNotifications: jest.fn().mockResolvedValue(undefined),
+  sendOrderDeliveredNotifications: jest.fn().mockResolvedValue(undefined),
+}));
+
 process.env.JWT_SECRET = "test_jwt_secret";
 process.env.JWT_REFRESH_SECRET = "test_jwt_refresh_secret";
 
@@ -15,6 +24,10 @@ const jwt = require("jsonwebtoken");
 const request = require("supertest");
 const pool = require("../src/config/db");
 const { uploadCategoryImage, deleteCategoryImage } = require("../src/services/cloudinary.service");
+const {
+  sendOrderShippedNotifications,
+  sendOrderDeliveredNotifications,
+} = require("../src/services/notification.service");
 const app = require("../src/app");
 
 function adminToken() {
@@ -512,6 +525,26 @@ describe("Admin Read-Only APIs", () => {
             c.params[2] === "shipped"
         )
       ).toBe(true);
+      expect(sendOrderShippedNotifications).toHaveBeenCalledWith(5);
+      expect(sendOrderDeliveredNotifications).not.toHaveBeenCalled();
+    });
+
+    test("a notification failure never affects the fulfillment response -- status update is never rolled back", async () => {
+      mockActiveSession();
+      const { client } = setupClient("processing");
+
+      sendOrderShippedNotifications.mockRejectedValueOnce(new Error("Resend and WhatsApp both down"));
+
+      const response = await patch({
+        status: "shipped",
+        trackingCarrier: "BlueDart",
+        trackingNumber: "BD123456789",
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.status).toBe("shipped");
+      expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(client.query).not.toHaveBeenCalledWith("ROLLBACK");
     });
 
     test("marks a shipped order as delivered", async () => {
@@ -523,9 +556,11 @@ describe("Admin Read-Only APIs", () => {
       expect(response.status).toBe(200);
       expect(response.body.data.status).toBe("delivered");
       expect(client.query).toHaveBeenCalledWith("COMMIT");
+      expect(sendOrderDeliveredNotifications).toHaveBeenCalledWith(5);
+      expect(sendOrderShippedNotifications).not.toHaveBeenCalled();
     });
 
-    test("rejects shipping an order that is not currently processing", async () => {
+    test("rejects shipping an order that is not currently processing, no notification sent", async () => {
       mockActiveSession();
       const { client } = setupClient("pending_payment");
 
@@ -537,6 +572,7 @@ describe("Admin Read-Only APIs", () => {
 
       expect(response.status).toBe(409);
       expect(client.query).toHaveBeenCalledWith("ROLLBACK");
+      expect(sendOrderShippedNotifications).not.toHaveBeenCalled();
     });
 
     test("returns 404 for an unknown order number", async () => {
